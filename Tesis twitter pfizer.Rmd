@@ -1,0 +1,1532 @@
+---
+title: "Tesis Twitter Pfizer"
+author: "Victoria Friss de Kereki"
+date: "2022-10-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r paquete, message=FALSE, warning=FALSE, include=FALSE}
+
+library("dplyr")                                    # Load dplyr package
+library("readr")   
+# library(tidyverse) # este paquete es un conjunto de paquetes. para qué uso este en particular? por ahora lo saco y veré
+library(lubridate)   # para trabajar con fechas
+library(ggplot2)   # para gráficas
+library(tidytext)   # para sacar stopwords y análisis de sentimiento también
+library(tm) # to add Spanish stopwords
+library(tidyquant) # to download stock data from Yahoo Finance
+library(tibble) # to turn row name into first column for PFE_df   ---- ahora se llama tibble?
+library(wordcloud)  # para hacer wordcloud
+# library(SentimentAnalysis)   # para el segundo sentiment analysis
+# library(doParallel)   # para procesamiento paralelo en sentiment analysis
+library(ggrepel)    # para que labels de ggplot2 no se pisen
+library(ggpubr)     # para que las gráficas de ggplot2 estén todas en una misma imagen
+library(scales)   # para scale_x_date en ggplot2
+library(textdata)   # The textdata package is required to download the AFINN lexicon.
+library(reshape2)   # para la función melt que usé en la linea 700 algo para mejorar una gráfica
+library(psych)      # para visualizar las correlaciones tipo linea 800
+library(sentimentr)   # sentiment analysis that considers full sentences
+library(purrr)   # para la importación de los csv. function "map_dfr"
+library(tidyr)   # to create dummies for the weekdays with function spread
+library(stringr)  # usada para str_detect en la parte de palabras más usadas:  tweets_words_2 <- tweets_words %>% select(content) %>% unnest_tokens(word, content) %>% anti_join(stop_words) %>% filter(!str_detect(word, "pfizer")) 
+
+
+Sys.setlocale("LC_ALL", "English")  # Set language to English. (Change locale to English?). This is so PFE graph will be in English.
+
+setwd("C:/Users/Victoria/Desktop/Respaldo UM OneDrive/UM - MAFI 21-22/Tesis/")
+
+```
+
+
+```{r combinar CSVs, warning=FALSE}
+
+
+
+files <- list.files(path = "C:/Users/Victoria/Desktop/Respaldo UM OneDrive/UM - MAFI 21-22/Tesis/twitter pfizer",  # Identify all CSV files
+                       pattern = "*.csv", full.names = TRUE)
+
+
+tweets <- files %>% 
+    set_names() %>% 
+    map_dfr(.f = read_delim,
+            delim = ";",
+            .id = "file_name")
+
+
+tweets <- as.data.frame(tweets)
+
+tweets$date2 <- as.Date(tweets$date, "%Y/%m/%d", tz="UTc")
+
+
+write.csv(tweets, file='tweets_brutos.csv' , row.names = F)
+# tweets <- read.csv('tweets_brutos.csv')
+
+
+
+```
+
+A tener en cuenta, pero no sé si podré hacer algo al respecto: se pueden borrar tweets. Si corro hoy una fecha que ya corrí antes, a veces hay algún tweet menos.
+
+
+```{r check scraping is okay}
+
+# tema a chequear: que todos los archivos hayan quedado completos y no les falten las primeras o últimas horas. cuando se corta el internet que queda un archivo de 1KB, el día anterior o posterior puede haber sido afectado también. Para esto armar archivo de días/horas desde el 01/01/2020 00:00 hasta ahora, y ver si en alguno hay 0 tweets. si pasa, correr de nuevo el scraping de la fecha
+
+# 1 Create dataframe with dates and times
+
+dates <- as.data.frame(
+                          seq(from=as.POSIXct("2020-01-01 00:00:00", tz="UTC"), 
+                          to=as.POSIXct("2022-12-31 23:00:00", tz="UTC"), by="hour")
+                        )
+
+colnames(dates) <- 'Date'
+
+dates$Time <- hour(dates$Date)
+dates$Date <- date(dates$Date)
+
+
+
+# 2 Create group by of tweets by dates and times
+
+tweets$time <- hour(tweets$date)
+tweets_date_time <- tweets %>% group_by(date2,time) %>% summarise(tweets_count = n())
+tweets_date_time$date2 <- as.Date(tweets_date_time$date2)
+
+tweets_dates_check <- left_join(dates, tweets_date_time, by= c("Date"="date2", "Time"="time"))
+
+tweets_dates_check <- subset(tweets_dates_check, is.na(tweets_dates_check$tweets_count))
+
+
+# Confirmo que hay fechas que no quedaron bien. En estas hay varias horas seguidas sin registros: 2022-10-31, 2022-10-12, 2022-09-30, 2022-08-22, 2022-07-04, 2022-05-18, 2022-04-28, 2022-04-15, 2022-03-16, 2022-02-19, 2022-02-01, 2022-01-13, 2022-01-09, 2021-12-22, 2021-12-18, 2021-12-09, 2021-11-25, 2021-11-11, 2021-11-02, 2021-10-30, 2021-10-11, 2021-10-01, 2021-09-26, 2021-09-15, 2021-08-31, 2021-08-23, 2021-08-04, 2021-07-31, 2021-07-15, 2021-07-02, 2021-06-22, 2021-06-16, 2021-06-11, 2021-06-02, 2021-05-24, 2021-05-20, 2021-05-11, 2021-05-02, 2021-04-28, 2021-04-19, 2021-04-15, 2021-04-07, 2021-03-26, 2021-03-20, 2021-03-15, 2021-01-23, 2021-01-19, 2020-12-30, 2020-12-25
+
+# Volví a correrlos todos, y armaré de nuevo el archivo con todos los tweets para chequear que ahora no haya agujeros.
+# Listo. Incluso revisé alguno de esos en los que falta una hora y está okay. Eran días de pocos tweets, y cuando se corta la conexión faltan varias horas seguidas y no una sola suelta.
+
+```
+
+
+
+
+```{r analisis general numeros}
+tweets_date <- tweets %>% group_by(date2) %>% summarise(tweets_count = n())
+
+# tweets_date$date2 <- as.Date(tweets_date$date2) # necesario cuando importo el csv porque date no está como fecha
+ggplot(tweets_date, aes(y=tweets_count, x=date2)) + geom_line() + geom_smooth()
+
+hist(tweets_date$tweets_count, breaks=50)
+
+
+tweets_month <- tweets_date %>% group_by(year(date2), month(date2)) %>% summarise(tweets_month = sum(tweets_count))
+tweets_month$month_year <- as.Date(paste(tweets_month$`year(date2)`,tweets_month$`month(date2)`,"01",sep="-"))
+
+hist(tweets_month$tweets_month)
+
+
+
+ggplot(tweets_month, aes(y=tweets_month, x=month_year)) + geom_bar(stat="identity", fill="steelblue") +
+                    scale_x_date(breaks=seq(as.Date("2020-01-01"),as.Date("2022-12-31"), by = "1 month"), date_labels="%b %y") +  
+                    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), 
+                          panel.grid.minor = element_blank(),
+                          panel.border = element_blank(),
+                          axis.line = element_line(colour="black"),
+                          axis.ticks = element_line(linewidth = 1)) +
+                    scale_y_continuous(labels = scales::comma, limits=c(0,1000000), n.breaks=10) + 
+                    xlab("Month - Year") + ylab("Total Number of Tweets") + ggtitle("Tweets Per Month\n2020-2022") +  theme(plot.title = element_text(hjust = 0.5))
+
+
+# con el scale_x_date hice aparecer todos los labels y con el theme axis.text.x giré los labels
+# con el scale_y_continuous hice que los números del eje y aparezcan completos y lo hice arrancar en 0 (no puede haber cantidad negativa de tweets)
+# con lo del theme ajusto el fondo y agrego la línea de eje bien negra con axis.line
+# theme_bw() es para sacar el fondito gris
+
+# write.csv(tweets_date, file='tweets_date.csv' , row.names = F)
+# write.csv(tweets_month, file='tweets_month.csv' , row.names = F)
+# tweets_date <- read.csv('tweets_date.csv')
+# tweets_month <- read.csv('tweets_month.csv')
+# tweets_date$date2 <- as.Date(tweets_date$date2) # necesario cuando importo el csv porque date no está como fecha
+
+```
+
+
+
+hacer análisis de qué ocurrió en los días outliers. cuál fue la novedad del día que hizo que ocurriera.
+además del análisis hacer una introducción conceptual del tema.
+https://statsandr.com/blog/outliers-detection-in-r/
+
+
+
+
+```{r outliers}
+
+summary(tweets_date$tweets_count)
+range(tweets_date$tweets_count)
+
+hist(tweets_date$tweets_count, 
+     xlab = "Tweets per day",
+     main = "Histogram Tweets per day", 
+     breaks = sqrt(nrow(tweets_date)) )
+
+
+
+# formula for outlier detection and label creation for ggplot graph
+
+is_outlier <- function(x) { return(x < quantile(x, 0.25) - 1.5 * IQR(x) | x > quantile(x, 0.75) + 1.5 * IQR(x)) }
+
+tweets_date <- tweets_date %>% group_by() %>% mutate(is_outlier=ifelse(is_outlier(tweets_count), paste(date2," - ",format(tweets_count, big.mark=",")), as.numeric(NA)))
+
+# boxplot con ggplot2 mejorado
+
+median(tweets_date$tweets_count)
+quantile(tweets_date$tweets_count, 0.25)
+quantile(tweets_date$tweets_count, 0.75)
+IQR(tweets_date$tweets_count)
+quantile(tweets_date$tweets_count, 0.75) + 1.5 * IQR(tweets_date$tweets_count)
+
+ggplot(tweets_date) + aes(x = "", y = tweets_count) +
+                      ylab("Tweets Count in a Single Day (#)") + ggtitle("Tweets Per Day\n2020-2022") + xlab("") +
+                      geom_boxplot(fill = "lightblue") +
+                      theme_bw() + 
+                      scale_y_continuous(labels = scales::comma, limits=c(0,NA), n.breaks=12) +
+                      scale_x_discrete() +
+                      theme(plot.title = element_text(hjust = 0.5)) +
+                      geom_text_repel(aes(label=is_outlier), hjust=-.1, size=3.2, direction = "y", box.padding = 0.18, min.segment.length = unit(0, 'lines'))
+
+
+
+# extract outliers and identify date
+outliers <- boxplot.stats(tweets_date$tweets_count)$out
+outliers_row <- which(tweets_date$tweets_count %in% c(outliers))
+outliers_row
+
+tweets_date[outliers_row, c(1:2)] %>% arrange(1)
+
+outlier_dates <-  tweets_date[outliers_row, c(1)] 
+outlier_dates$date2 <- as.Date(outlier_dates$date2)
+tweets$date2 <- as.Date(tweets$date2)
+
+tweets_outlier_dates <- tweets[tweets$date2 %in% outlier_dates$date2, ]
+tweets_outlier_dates <- filter(tweets_outlier_dates, likeCount>150)
+
+tweets_outlier_dates_top <- tweets_outlier_dates %>%
+  group_by(date2) %>%
+  slice_max(n = 1, order_by = quoteCount, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(date2, date, url, content, user, replyCount, retweetCount, likeCount, quoteCount, lang, sourceLabel)
+
+# tweets_outlier_dates_specific <- tweets[tweets$date2 == '2021-05-13', ]
+
+
+```
+
+
+
+```{r general numbers organic and sources}
+
+# Remove replies
+tweets_organic_all <- subset(tweets, is.na(tweets$inReplyToTweetId)) 
+
+# Check how many likes each has
+tweets_organic_all <- tweets_organic_all %>% arrange(-likeCount)
+
+# Proporción de orgánicos y respuestas
+
+Total <- nrow(tweets)
+Organic <- nrow(tweets_organic_all)
+
+organic_nonorganic <- data.frame(Type = c("Organic","Reply"),
+                                 Value = c(Organic, Total-Organic))
+
+organic_nonorganic <- organic_nonorganic %>% group_by() %>% mutate(percent = Value / sum(Value)) %>% mutate(percent = scales::percent(percent, accuracy=0.1L))
+
+
+ggplot(organic_nonorganic, aes(x="", y=Value, fill=Type))+ geom_bar(width = 1, stat = "identity") +  coord_polar("y", start=0) + 
+        theme_void() +   geom_text(aes(label = percent),    position = position_stack(vjust = 0.5) , size=6 ) +  coord_polar(theta = "y") + 
+        ggtitle("Proportion of Organic Tweets and Replies\n2020-2022") + 
+        theme(plot.title = element_text(size=16, hjust=0.5), legend.title=element_text(size=15), legend.text = element_text(size=13))
+
+
+
+
+# From where were the tweets published. sourceLabel
+
+tweets_source <- tweets  %>% group_by(sourceLabel) %>% 
+                                summarize(n_tweets=n(), 
+                                          n_likes=sum(likeCount),
+                                          likes_per_tweet = round((sum(likeCount)/n()),2)  
+                                          ) %>% 
+                                arrange(-n_tweets)
+
+tweets_source <- as.data.frame(tweets_source)
+
+tweets_source <- tweets_source %>% group_by() %>% 
+              mutate(PercentageOfTotal = n_tweets / sum(n_tweets)) %>% 
+              mutate(PercentageOfTotal = scales::percent(PercentageOfTotal, accuracy=0.11L))
+
+head(tweets_source,10)
+
+tweets_source_total <- tweets_source %>% group_by() %>% 
+                          summarize(n_tweets= sum(n_tweets),
+                                    n_likes = sum(n_likes)
+                                    )   %>%
+              mutate(likes_per_tweet = n_likes/n_tweets)
+
+head(tweets_source_total)
+
+```
+
+
+
+```{r idioma tweet}
+
+tweets_languages <- tweets[c(14,4)] %>% group_by(lang) %>% summarise(amount = n())
+tweets_languages <- tweets_languages[order(-tweets_languages$amount),]
+
+tweets_languages$Language <- ifelse(tweets_languages$amount > 200000, tweets_languages$lang, "Others")
+tweets_languages_2 <- tweets_languages %>% group_by(Language) %>% summarise(TotalTweets = sum(amount))
+
+tweets_languages_2$Language <- ifelse(tweets_languages_2$Language == "en", "English", 
+                                      ifelse( tweets_languages_2$Language == "de", "German", 
+                                      ifelse( tweets_languages_2$Language == "es", "Spanish", 
+                                      ifelse( tweets_languages_2$Language == "fr", "French", 
+                                      ifelse( tweets_languages_2$Language == "it", "Italian", 
+                                      ifelse( tweets_languages_2$Language == "pt", "Portuguese", 
+                                      ifelse( tweets_languages_2$Language == "nl", "Dutch", tweets_languages_2$Language
+                                      )))))))
+
+tweets_languages_2 <- arrange(tweets_languages_2, by= -TotalTweets) %>% slice(1:3, 5:8, 4)
+
+tweets_languages_2 <- tweets_languages_2 %>% group_by() %>% 
+                      mutate(percent_of_total = TotalTweets / sum(TotalTweets)) %>% 
+                      mutate(percent_of_total = scales::percent(percent_of_total, accuracy=0.1L))
+
+ggplot(tweets_languages_2, aes(x="", y=TotalTweets, fill=reorder(Language, -TotalTweets))) +
+        geom_bar(width = 1, stat = "identity") +  
+        coord_polar("y", start=0) + 
+        labs(fill = "Language") +
+        theme_void() + 
+        ggtitle("Languages of Tweets\n2020-2022") + 
+        theme(plot.title = element_text(hjust = 0.5)) +
+        geom_text_repel(aes(label = format(percent_of_total)), position = position_stack(vjust = 0.5), box.padding=0.2, size=4.5) + 
+        theme(plot.title = element_text(size=16), legend.title=element_text(size=15), legend.text = element_text(size=13))
+
+
+        
+        
+
+```
+
+
+
+```{r users}
+
+# la parte de aislar el username demora muchísimo
+
+tweets_users <- tweets[c(8,4)] 
+
+tweets_users$user <- sub(".*, 'username': '", "", tweets_users$user)
+tweets_users$user <- sub("', 'id.*", "", tweets_users$user)
+
+# write.csv(tweets_users, file='tweets_users.csv' , row.names = F)
+
+tweets_users_2 <- tweets_users %>% group_by(user) %>% summarise(amount = n())
+tweets_users_2 <- arrange(tweets_users_2, by = -amount)
+
+# write.csv(tweets_users_2, file='tweets_users_grouped.csv' , row.names = F)
+tweets_users_2 <- read.csv('tweets_users_grouped.csv')
+
+# hist(tweets_users_2$amount, breaks=1000)
+
+tweets_users_3 <- tweets_users_2 %>% group_by(amount) %>% summarise(number_users = n())
+tweets_users_4 <- filter(tweets_users_2, amount<20)
+
+p1 <- ggplot(tweets_users_4, aes(x = amount)) + 
+  geom_histogram(binwidth = 1, color = "steelblue", fill = "lightblue") +
+  ggtitle("Tweet Frequency Analysis: Users with < 20 Tweets")  +
+  theme(plot.title = element_text(hjust = 0.5, size = 14), axis.line = element_line(color = "black"),
+        axis.title = element_text(size=12),
+        axis.text = element_text(size=12) )+
+  labs(x="Tweets Per User (#)", y= "Users (#)") +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.08))) +
+  scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.08)))
+  # +
+  # theme(plot.title = element_text(family = "Times New Roman", size = 14, hjust = 0.5),   #face="bold" o face="italic" si quiero
+  #       axis.title = element_text(family = "Times New Roman", size = 12),
+  #       axis.text = element_text(family = "Times New Roman", size = 12))
+
+tweets_users_5 <- filter(tweets_users_2, amount>19, amount<201)
+
+p2 <- ggplot(tweets_users_5, aes(x=amount)) + geom_histogram(binwidth=1, color="steelblue", fill="lightblue") +
+        ggtitle("Tweet Frequency Analysis: Users with 20 to 200 Tweets") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 14), axis.line = element_line(color = "black"),
+        axis.title = element_text(size=12),
+        axis.text = element_text(size=12) )+
+        labs(x="Tweets Per User (#)", y= "Users (#)") +
+        scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.08))) +
+  scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.08)), limits = c(0, NA)) 
+# +
+#   theme(plot.title = element_text(family = "Times New Roman", size = 14, hjust = 0.5),
+#         axis.title = element_text(family = "Times New Roman", size = 12),
+#         axis.text = element_text(family = "Times New Roman", size = 12))
+
+
+tweets_users_6 <- filter(tweets_users_2, amount>200)
+
+p3 <- ggplot(tweets_users_6, aes(x=amount)) + geom_histogram(binwidth=1, color="steelblue", fill="lightblue") +
+        ggtitle("Tweet Frequency Analysis: Users with > 200 Tweets") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 14), axis.line = element_line(color = "black"),
+        axis.title = element_text(size=12),
+        axis.text = element_text(size=12) )+
+        labs(x="Tweets Per User (#)", y= "Users (#)") +
+        scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.08))) +
+  scale_x_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.08)), limits = c(0, NA)) 
+# +
+#   theme(plot.title = element_text(family = "Times New Roman", size = 14, hjust = 0.5),
+#         axis.title = element_text(family = "Times New Roman", size = 12),
+#         axis.text = element_text(family = "Times New Roman", size = 12))
+
+gg_plot <- ggarrange(p1, p2, p3, ncol = 1, heights = c(5, 5, 5), align = "v")
+ggsave("plot.png", gg_plot, width = 8, height = 10, dpi = 300)
+
+
+head(tweets_users_2)
+
+# usuarios con más tweets
+
+
+
+set.seed(1234)
+wordcloud(tweets_sample_organic_language$user, min.freq=50, scale=c(2, .5), random.order=FALSE, rot.per=0.25, 
+          colors=brewer.pal(8, "Dark2"))
+
+
+# usuarios con tweets más populares
+
+popular_users <- tweets_sample_organic_language %>% group_by(user) %>% summarise(reply = sum(replyCount), 
+                                                                        retweet = sum(retweetCount), 
+                                                                        like = sum(likeCount),
+                                                                        quote = sum(quoteCount),
+                                                                        n_tweets = n()) 
+
+popular_users$total <- popular_users$reply + popular_users$retweet + popular_users$like + popular_users$quote
+popular_users$total_sobre_n = popular_users$total / popular_users$n_tweets
+
+popular_users <- popular_users %>% arrange(-total_sobre_n)
+
+head(popular_users)
+
+
+```
+
+
+
+
+
+
+
+
+```{r most frequent words from English tweets}
+
+# Clean it and remove stopwords, hyperlinks, mentions (@) and punctuation
+
+tweets_words <- tweets
+
+tweets_words <- filter(tweets, lang == "en")
+
+tweets_words$content <-  gsub("https\\S*", "", tweets_words$content)
+tweets_words$content <-  gsub("@\\S*", "", tweets_words$content) 
+tweets_words$content  <-  gsub("amp", "", tweets_words$content) 
+tweets_words$content  <-  gsub("[\r\n]", "", tweets_words$content)
+tweets_words$content  <-  gsub("[[:punct:]]", "", tweets_words$content)
+
+# before I'll need to add Spanish stopwords "Or you can add stopwords borrowing them from other text mining packages as quanteda or tm. Install those mentioned packages for the next chunk of code to properly work." http://jvera.rbind.io/post/2017/10/16/spanish-stopwords-for-tidytext-package/
+
+# custom_stop_words_spanish <- bind_rows(stop_words,
+#                                 data_frame(word = tm::stopwords("spanish"),
+#                                            lexicon = "custom"))
+# 
+# custom_stop_words_portuguese <- bind_rows(stop_words,
+#                               data_frame(word = tm::stopwords("portuguese"),
+#                                           lexicon = "custom"))
+# 
+# custom_stop_words_french <- bind_rows(stop_words,
+#                                 data_frame(word = tm::stopwords("french"),
+#                                            lexicon = "custom"))
+# 
+# custom_stop_words_german <- bind_rows(stop_words,
+#                                 data_frame(word = tm::stopwords("german"),
+#                                            lexicon = "custom"))
+#  
+# custom_stop_words_italian <- bind_rows(stop_words,
+#                                 data_frame(word = tm::stopwords("italian"),
+#                                            lexicon = "custom"))
+# 
+# 
+# tweets_words_2 <- tweets_words %>% select(content) %>% unnest_tokens(word, content) %>% 
+#                         anti_join(stop_words) %>% anti_join(custom_stop_words_spanish) %>% anti_join(custom_stop_words_portuguese) %>% 
+#                                                   anti_join(custom_stop_words_french) %>% anti_join(custom_stop_words_german) %>%
+#                                                   anti_join(custom_stop_words_italian)
+
+# write.csv(tweets_words, file='tweets_words.csv' , row.names = F)
+# tweets_words <- read.csv('tweets_words.csv')
+
+tweets_words_2 <- tweets_words %>% select(content) %>% unnest_tokens(word, content) %>% anti_join(stop_words) %>% filter(!str_detect(word, "pfizer"))
+# write.csv(tweets_words_2, file='tweets_words_2.csv' , row.names = F)
+
+
+# tweets_words_3 <- tweets_words_2 %>% group_by(word) %>% summarise(times_used = n())
+# write.csv(tweets_words_3, file='tweets_words_3.csv' , row.names = F)
+# tweets_words_3 <- read.csv('tweets_words_3.csv')
+
+tweets_words_2 %>% # gives you a bar chart of the most frequent words found in the tweets
+  count(word, sort = TRUE) %>%
+  top_n(30) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(fill="steelblue") +
+  xlab(NULL) +
+  coord_flip() +
+  labs(y = "Count",
+       x = "Unique words",
+       title = "Most frequent words in tweets in English related to Pfizer",
+       subtitle = "Stopwords and \"Pfizer\" removed from the list") + 
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.08)), limits = c(0, NA)) 
+
+    
+    
+```
+
+
+
+```{r most frequent hashtags}
+
+
+tweets_sample_organic_language$hashtags <- as.character(tweets_sample_organic_language$hashtags)
+
+tweets_sample_organic_language$hashtags <- gsub("c\\(", "", tweets_sample_organic_language$hashtags)
+
+set.seed(1234)
+wordcloud(tweets_sample_organic_language$hashtags, min.freq=80, scale=c(3.5, .5), random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+
+
+
+
+```
+
+separo los tweets en inglés y orgánicos
+
+```{r organic English tweets}
+
+# orgánicos y en inglés
+# orgánicos (ya fue corrida más arriba)
+# tweets_organic_all <- subset(tweets, is.na(tweets$inReplyToTweetId)) 
+# en inglés
+# tweets_organic_en <- subset(tweets_organic_all, tweets_organic_all$lang == "en")
+
+# de una orgánicos y en inglés para que sea más rápido
+tweets_organic_en <- subset(tweets, is.na(tweets$inReplyToTweetId) & tweets$lang == "en") 
+# write.csv(tweets_organic_en, file='tweets_organic_en.csv' , row.names = F)
+# tweets_organic_en <- read.csv('tweets_organic_en.csv')
+
+# organic tweets in English per day
+tweets_date_organic_english <- tweets_organic_en %>% group_by(date2) %>% summarise(tweets_count = n())
+colnames(tweets_date_organic_english)[1] <- "date"
+tweets_date_organic_english$date <- as.Date(tweets_date_organic_english$date)
+
+
+tweets_sentiment <- tibble(line = 1:nrow(tweets_organic_en), text = tweets_organic_en[,5])
+tweets_sentiment <- tweets_sentiment %>% unnest_tokens(word, text)
+
+# write.csv(tweets_sentiment, file='tweets_sentiment.csv' , row.names = F)
+# tweets_sentiment <- read.csv('tweets_sentiment.csv')
+
+
+# chequear número por mes de tweets orgánicos en inglés
+
+tweets_month_org_en <- tweets_date_organic_english %>% group_by(year(date), month(date)) %>% summarise(tweets_month_org_en = sum(tweets_count))
+tweets_month_org_en$month_year <- as.Date(paste(tweets_month_org_en$`year(date)`,tweets_month_org_en$`month(date)`,"01",sep="-"))
+
+
+```
+
+What is a sentiment analysis?
+
+Hacer una intro de qué es, qué significa y qué implica, con algo de bibliografía y letra.
+
+
+```{r sentiment analysis bing}
+
+
+# Estos están solo en inglés. Ver si trabajo solo en inglés o lo hago también en otros idiomas.
+
+
+# https://www.tidytextmining.com/sentiment.html
+
+# The function get_sentiments() allows us to get specific sentiment lexicons with the appropriate measures for each one.
+# get_sentiments("afinn")  --- Asigna un número positivo o negativo a cada palabra clave, según qué tan positiva o negativa sea. Tiene 2467 registros.
+# get_sentiments("bing") --- Asigna "negative" o "positive" a cada palabra clave. Tiene 6776 registros.
+# get_sentiments("nrc") --- Asigna un sentimiento a cada palabra clave. Estos sentimientos son "trust", "fear", "negative", "sadness", "anger", etc. Tiene 13.891 registros.
+
+# Tener en cuenta:
+# Not every English word is in the lexicons because many English words are pretty neutral. It is important to keep in mind that these methods do not take into account qualifiers before a word, such as in “no good” or “not true”; a lexicon-based method like this is based on unigrams only.
+# Ver si voy a precisar otro método.
+
+# Puede que tenga que hacer un loop analizando un tweet a la vez. Probemos.
+
+get_sentiments("bing")
+
+
+
+tweets_sentiment_bing <- tweets_sentiment %>% inner_join(get_sentiments("bing")) %>% group_by(line) %>% 
+                                                summarise(positive = sum(sentiment == "positive") ,
+                                                          negative = sum(sentiment == "negative"))
+
+tweets_sentiment_bing$positivity_index <- tweets_sentiment_bing$positive - tweets_sentiment_bing$negative
+tweets_sentiment_bing
+
+
+# Ahora que tengo un índice de positividad para cada tweet (si no hay valor entonces es 0 - neutral), lo uno al dataset original para armar índice por fecha.
+tweets_organic_en$line <- seq.int(nrow(tweets_organic_en)) 
+
+
+tweets_organic_en_2 <- tweets_organic_en %>% left_join(tweets_sentiment_bing)
+
+tweets_organic_en_2 <- tweets_organic_en_2[,c("date","lang","positivity_index")]
+tweets_organic_en_2[is.na(tweets_organic_en_2)] <- 0
+
+colnames(tweets_organic_en_2)[1] <- "date"
+tweets_organic_en_2$date <- as.Date(tweets_organic_en_2$date)
+tweets_organic_en_2 <- tweets_organic_en_2 %>% group_by(date) %>% summarise(positivity_index_bing = sum(positivity_index),
+                                                                            bing_pos = sum(positivity_index > 0),
+                                                                            bing_neg = sum(positivity_index < 0),
+                                                                            bing_zero = sum(positivity_index == 0))
+
+
+# agrego tweets por día solo orgánicos en inglés para hacer promedio en el índice
+tweets_organic_en_2 <- tweets_date_organic_english %>% left_join(tweets_organic_en_2)
+tweets_organic_en_2$positivity_index_avg <- tweets_organic_en_2$positivity_index_bing / tweets_organic_en_2$tweets_count
+
+
+ggplot(tweets_organic_en_2, aes(x=date, y=positivity_index_avg)) +  geom_line(color = "steelblue") + xlab("") + 
+  ggtitle("Bing Positivity Index per Day\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y= "Positivity Index") +
+  scale_x_date(breaks = seq(as.Date("2020-01-01"), as.Date("2023-01-01"), by = "1 month"), date_labels = "%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+
+
+
+tweets_sample_organic_language_month <- tweets_organic_en_2 %>% group_by( year(date),month(date)) %>% summarise(positivity_index_avg = mean(positivity_index_avg),
+                                                                                                                      bing_pos = sum(bing_pos),
+                                                                                                                      bing_neg = sum(bing_neg),
+                                                                                                                      bing_zero = sum(bing_zero))                        
+
+
+tweets_sample_organic_language_month$year_month <- as.yearmon(paste(tweets_sample_organic_language_month$'year(date)', tweets_sample_organic_language_month$'month(date)'), "%Y %m")
+
+ggplot(tweets_sample_organic_language_month, aes(x=year_month, y=positivity_index_avg)) +  geom_line(color="steelblue",size=0.8) + xlab("") + 
+      scale_x_yearmon(labels=date_format("%b %y"), 
+                         breaks = seq(from = min(tweets_sample_organic_language_month$year_month), 
+                                      to = max(tweets_sample_organic_language_month$year_month), 
+                                      by = 1/12),
+                       expand = expansion(mult = c(0.015, 0.015))) +
+      theme(axis.text.x = element_text(angle = 90)) +
+      ggtitle("Bing Positivity Index Per Month\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +  labs(x="", y= "Positivity Index")
+
+
+
+
+# create graph per month but with bars with sentiments
+# first turn dataframe to long format
+
+tweets_sample_organic_language_month_long <- pivot_longer(tweets_sample_organic_language_month, cols = c("bing_pos", "bing_neg", "bing_zero"), names_to = "Sentiment", values_to = "Number of Tweets")
+
+tweets_sample_organic_language_month_long <- tweets_sample_organic_language_month_long %>%
+  mutate(Sentiment = recode(Sentiment,
+                            "bing_pos" = "Positive",
+                            "bing_neg" = "Negative",
+                            "bing_zero" = "Neutral"))
+
+# Order the levels of the Sentiment variable
+tweets_sample_organic_language_month_long$Sentiment <-   factor(tweets_sample_organic_language_month_long$Sentiment, 
+                                                           levels = c("Negative", "Neutral", "Positive"))
+
+ggplot(tweets_sample_organic_language_month_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col() +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Number of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_long$year_month), 
+                               by = 1/12),
+                  expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0.015, 0.04))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("Bing Tweets by Sentiment per Month\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL)) 
+
+
+# Create stacked bar chart
+ggplot(tweets_sample_organic_language_month_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col(position = position_fill(reverse = FALSE)) +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Percentage of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_long$year_month), 
+                               by = 1/12),
+                  expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.y = element_text(size = 12)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("Bing Tweets by Sentiment per Month (%)\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL))
+
+
+
+
+```
+
+```{r sentiment analysis afinn}
+
+get_sentiments("afinn") # --- Asigna un número positivo o negativo a cada palabra clave, según qué tan positiva o negativa sea. Tiene 2467 registros.
+
+# tweets_organic_en <- read.csv('tweets_organic_en.csv')
+
+# # organic tweets in English per day
+# tweets_date_organic_english <- tweets_organic_en %>% group_by(date2) %>% summarise(tweets_count = n())
+# colnames(tweets_date_organic_english)[1] <- "date"
+# tweets_date_organic_english$date <- as.Date(tweets_date_organic_english$date)
+# 
+# write.csv(tweets_date_organic_english, file='tweets_date_organic_english.csv' , row.names = F)
+# tweets_date_organic_english <- read.csv('tweets_date_organic_english.csv')
+# tweets_date_organic_english$date <- as.Date(tweets_date_organic_english$date)
+# 
+# tweets_sentiment <- tibble(line = 1:nrow(tweets_organic_en), text = tweets_organic_en[,5])
+# tweets_sentiment <- tweets_sentiment %>% unnest_tokens(word, text)
+# tweets_sentiment
+
+tweets_sentiment_afinn <- tweets_sentiment %>% inner_join(get_sentiments("afinn")) %>% group_by(line) %>% 
+                                                summarise(sentiment_afinn = sum(value))
+
+
+
+# Ahora que tengo un índice de positividad para cada tweet (si no hay valor entonces es 0 - neutral), lo uno al dataset original para armar índice por fecha.
+tweets_organic_en$line <- seq.int(nrow(tweets_organic_en)) 
+
+
+tweets_organic_en_3 <- tweets_organic_en %>% left_join(tweets_sentiment_afinn)
+
+tweets_organic_en_3 <- tweets_organic_en_3[,c("date","lang","sentiment_afinn")]
+tweets_organic_en_3[is.na(tweets_organic_en_3)] <- 0
+
+tweets_organic_en_3$date <- as.Date(tweets_organic_en_3$date)
+tweets_organic_en_3 <- tweets_organic_en_3 %>% group_by(date) %>% summarise(sent_afinn = sum(sentiment_afinn),
+                                                                            afinn_pos = sum(sentiment_afinn > 0),
+                                                                            afinn_neg = sum(sentiment_afinn < 0),
+                                                                            afinn_zero = sum(sentiment_afinn == 0))
+
+# agrego tweets por día solo orgánicos en inglés para hacer promedio en el índice
+tweets_organic_en_3 <- tweets_date_organic_english %>% left_join(tweets_organic_en_3)
+tweets_organic_en_3$sentiment_afinn_avg <- tweets_organic_en_3$sent_afinn / tweets_organic_en_3$tweets_count
+
+
+ggplot(tweets_organic_en_3, aes(x=date, y=sentiment_afinn_avg)) +  geom_line(color = "steelblue") + xlab("") + 
+  ggtitle("AFINN Positivity Index per Day\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y= "Positivity Index") +
+  scale_x_date(breaks = seq(as.Date("2020-01-01"), as.Date("2023-01-01"), by = "1 month"), date_labels = "%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+
+
+
+
+tweets_sample_organic_language_month_AFINN <- tweets_organic_en_3 %>% group_by( year(date),month(date)) %>% summarise(sentiment_afinn_avg = mean(sentiment_afinn_avg),
+                                                                                                                      afinn_pos = sum(afinn_pos),
+                                                                                                                      afinn_neg = sum(afinn_neg),
+                                                                                                                      afinn_zero = sum(afinn_zero))
+tweets_sample_organic_language_month_AFINN$year_month <- as.yearmon(paste(tweets_sample_organic_language_month_AFINN$'year(date)', tweets_sample_organic_language_month_AFINN$'month(date)'), "%Y %m")
+
+ggplot(tweets_sample_organic_language_month_AFINN, aes(x=year_month, y=sentiment_afinn_avg)) +  geom_line(color="steelblue",size=0.8) + xlab("") + 
+      scale_x_yearmon(labels=date_format("%b %y"), 
+                         breaks = seq(from = min(tweets_sample_organic_language_month_AFINN$year_month), 
+                                      to = max(tweets_sample_organic_language_month_AFINN$year_month), 
+                                      by = 1/12),
+                      expand = expansion(mult = c(0.015, 0.015))) +
+      theme(axis.text.x = element_text(angle = 90)) +
+      ggtitle("AFINN Positivity Index per Month\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +  labs(x="", y= "Positivity Index")
+
+
+
+
+# create graph per month but with bars with sentiments
+# first turn dataframe to long format
+
+tweets_sample_organic_language_month_AFINN_long <- pivot_longer(tweets_sample_organic_language_month_AFINN, cols = c("afinn_pos", "afinn_neg", "afinn_zero"), names_to = "Sentiment", values_to = "Number of Tweets")
+
+tweets_sample_organic_language_month_AFINN_long <- tweets_sample_organic_language_month_AFINN_long %>%
+  mutate(Sentiment = recode(Sentiment,
+                            "afinn_pos" = "Positive",
+                            "afinn_neg" = "Negative",
+                            "afinn_zero" = "Neutral"))
+
+# Order the levels of the Sentiment variable
+tweets_sample_organic_language_month_AFINN_long$Sentiment <- 
+  factor(tweets_sample_organic_language_month_AFINN_long$Sentiment, 
+         levels = c("Negative", "Neutral", "Positive"))
+
+ggplot(tweets_sample_organic_language_month_AFINN_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col() +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Number of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_AFINN_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_AFINN_long$year_month), 
+                               by = 1/12),
+                  expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0.015, 0.04))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("AFINN Tweets by Sentiment per Month\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL))
+
+
+# Create stacked bar chart
+ggplot(tweets_sample_organic_language_month_AFINN_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col(position = position_fill(reverse = FALSE)) +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Percentage of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_AFINN_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_AFINN_long$year_month), 
+                               by = 1/12),
+                                    expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.y = element_text(size = 12)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("AFINN Tweets by Sentiment per Month (%)\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL))
+
+
+
+
+
+```
+
+
+```{r sentiment analysis nrc}
+
+# get_sentiments("nrc") --- Asigna un sentimiento a cada palabra clave. Estos sentimientos son "trust", "fear", "negative", "sadness", "anger", etc. Tiene 13.891 registros.
+get_sentiments("nrc")  
+
+tweets_sentiment_nrc <- tweets_sentiment %>% inner_join(get_sentiments("nrc")) %>% group_by(line) %>% 
+                                                summarise(positive = sum(sentiment == "positive"),
+                                                          negative = sum(sentiment == "negative"),
+                                                          anger = sum(sentiment == "anger"),
+                                                          anticipation = sum(sentiment == "anticipation"),
+                                                          disgust = sum(sentiment == "disgust"),
+                                                          fear = sum(sentiment == "fear"),
+                                                          joy = sum(sentiment == "joy"),
+                                                          sadness = sum(sentiment == "sadness"),
+                                                          surprise = sum(sentiment == "surprise"),
+                                                          trust = sum(sentiment == "trust")
+                                                          )
+
+tweets_sentiment_nrc$positivity_index_nrc <- tweets_sentiment_nrc$positive - tweets_sentiment_nrc$negative
+
+# Ahora que tengo un índice de positividad para cada tweet (si no hay valor entonces es 0 - neutral), lo uno al dataset original para armar índice por fecha.
+tweets_organic_en$line <- seq.int(nrow(tweets_organic_en))  # ya fue hecho en el sentiment anterior, pero si no...
+# lo uno al dataset original para armar índice por fecha.
+
+tweets_organic_en_4 <- tweets_organic_en %>% left_join(tweets_sentiment_nrc)
+
+tweets_organic_en_4 <- tweets_organic_en_4[,c("date","lang","positivity_index_nrc")]
+tweets_organic_en_4[is.na(tweets_organic_en_4)] <- 0
+
+tweets_organic_en_4$date <- as.Date(tweets_organic_en_4$date)
+tweets_organic_en_4 <- tweets_organic_en_4 %>% group_by(date) %>% summarise(sent_nrc = sum(positivity_index_nrc),
+                                                                            nrc_pos = sum(positivity_index_nrc > 0),
+                                                                            nrc_neg = sum(positivity_index_nrc < 0),
+                                                                            nrc_zero = sum(positivity_index_nrc == 0))
+
+
+# agrego tweets por día solo orgánicos en inglés para hacer promedio en el índice
+tweets_organic_en_4 <- tweets_date_organic_english %>% left_join(tweets_organic_en_4)
+tweets_organic_en_4$tweets_sentiment_nrc_avg <- tweets_organic_en_4$sent_nrc / tweets_organic_en_4$tweets_count
+
+
+ggplot(tweets_organic_en_4, aes(x=date, y=tweets_sentiment_nrc_avg)) +  geom_line(color = "steelblue") + xlab("") + 
+  ggtitle("NRC Positivity Index per Day\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y= "Positivity Index") +
+    scale_x_date(breaks = seq(as.Date("2020-01-01"), as.Date("2023-01-01"), by = "1 month"), date_labels = "%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+
+
+
+tweets_sample_organic_language_month_nrc <- tweets_organic_en_4 %>% 
+                                              group_by( year(date),month(date)) %>% 
+                                              summarise(tweets_sentiment_nrc_avg = mean(tweets_sentiment_nrc_avg),                                                                                                               nrc_pos = sum(nrc_pos),
+                                                    nrc_neg = sum(nrc_neg),
+                                                    nrc_zero = sum(nrc_zero))
+tweets_sample_organic_language_month_nrc$year_month <- as.yearmon(paste(tweets_sample_organic_language_month_nrc$'year(date)', tweets_sample_organic_language_month_nrc$'month(date)'), "%Y %m")
+
+
+
+ggplot(tweets_sample_organic_language_month_nrc, aes(x=year_month, y=tweets_sentiment_nrc_avg)) +  geom_line(color="steelblue",size=0.8) + xlab("") + 
+      scale_x_yearmon(labels=date_format("%b %y"), 
+                         breaks = seq(from = min(tweets_sample_organic_language_month_nrc$year_month), 
+                                      to = max(tweets_sample_organic_language_month_nrc$year_month), 
+                                      by = 1/12),
+                                            expand = expansion(mult = c(0.015, 0.015))) +
+      theme(axis.text.x = element_text(angle = 90)) +
+      ggtitle("NRC Positivity Index per Month\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +  labs(x="", y= "Positivity Index")
+
+
+
+
+# create graph per month but with bars with sentiments
+# first turn dataframe to long format
+
+tweets_sample_organic_language_month_nrc_long <- pivot_longer(tweets_sample_organic_language_month_nrc, cols = c("nrc_pos", "nrc_neg", "nrc_zero"), names_to = "Sentiment", values_to = "Number of Tweets")
+
+tweets_sample_organic_language_month_nrc_long <- tweets_sample_organic_language_month_nrc_long %>%
+  mutate(Sentiment = recode(Sentiment,
+                            "nrc_pos" = "Positive",
+                            "nrc_neg" = "Negative",
+                            "nrc_zero" = "Neutral"))
+
+# Order the levels of the Sentiment variable
+tweets_sample_organic_language_month_nrc_long$Sentiment <- 
+  factor(tweets_sample_organic_language_month_nrc_long$Sentiment, 
+         levels = c("Negative", "Neutral", "Positive"))
+
+ggplot(tweets_sample_organic_language_month_nrc_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col() +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Number of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_nrc_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_nrc_long$year_month), 
+                               by = 1/12),
+                                    expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0.015, 0.04))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("NRC Tweets by Sentiment per Month\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL))
+
+
+# Create stacked bar chart
+ggplot(tweets_sample_organic_language_month_nrc_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col(position = position_fill(reverse = FALSE)) +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Percentage of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_nrc_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_nrc_long$year_month), 
+                               by = 1/12),
+                  expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.y = element_text(size = 12)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("NRC Tweets by Sentiment per Month (%)\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL))
+
+
+
+
+```
+
+
+
+Neutralize negations!
+https://www.r-bloggers.com/2019/07/how-to-do-negation-proof-sentiment-analysis-in-r/
+Let’s define two sentences for us to check if sentimentr is negation-proof.
+
+According to the documentation of sentimentr, (https://github.com/trinker/sentimentr)
+
+So what does sentimentr do that other packages don’t?
+
+sentimentr attempts to take into account valence shifters (i.e., negators, amplifiers (intensifiers), de-amplifiers (downtoners), and adversative conjunctions) while maintaining speed. Simply put, sentimentr is an augmented dictionary lookup.
+
+Warning: Each time `sentiment` is run it has to do sentence boundary disambiguation when a raw `character` vector is passed to `text.var`. This may be costly of time and memory.  It is highly recommended that the user first runs the raw `character` vector through the `get_sentences` function.
+
+```{r sentiment analysis neutralize negations}
+ 
+
+sentimentr_sentiment <- get_sentences(tweets_organic_en$content)
+sentimentr_sentiment <- sentiment(sentimentr_sentiment)
+
+sentimentr_grouped <- sentimentr_sentiment %>% group_by(element_id) %>% summarise(sentiment = mean(sentiment))
+
+colnames(sentimentr_grouped)[1] <- "line"
+
+# lo uno al dataset original para armar índice por fecha.
+
+tweets_organic_en_5 <- tweets_organic_en %>% left_join(sentimentr_grouped)
+
+tweets_organic_en_5 <- tweets_organic_en_5[,c("date","sentiment")]
+tweets_organic_en_5[is.na(tweets_organic_en_5)] <- 0
+
+tweets_organic_en_5$date <- as.Date(tweets_organic_en_5$date)
+
+
+tweets_organic_en_5 <- tweets_organic_en_5 %>% group_by(date) %>% summarise(sentiment_sentimentr = sum(sentiment),
+                                                                            sentimentr_pos = sum(sentiment > 0),
+                                                                            sentimentr_neg = sum(sentiment < 0),
+                                                                            sentimentr_zero = sum(sentiment == 0))
+
+
+# agrego tweets por día solo orgánicos en inglés para hacer promedio en el índice
+tweets_organic_en_5 <- tweets_date_organic_english %>% left_join(tweets_organic_en_5)
+tweets_organic_en_5$sentiment_sentimentr_avg <- tweets_organic_en_5$sentiment_sentimentr / tweets_organic_en_5$tweets_count
+
+
+
+
+ggplot(tweets_organic_en_5, aes(x=date, y=sentiment_sentimentr_avg)) +  geom_line(color = "steelblue") + xlab("") + 
+  ggtitle("SentimentR Positivity Index per Day\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y= "Positivity Index") +
+      scale_x_date(breaks = seq(as.Date("2020-01-01"), as.Date("2023-01-01"), by = "1 month"), date_labels = "%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) 
+
+
+
+
+tweets_sample_organic_language_month_sentimentr <- tweets_organic_en_5 %>% group_by( year(date),month(date)) %>% 
+                                                                                                summarise(sentiment_sentimentr_avg = mean(sentiment_sentimentr_avg),
+                                                                                                sentimentr_pos = sum(sentimentr_pos),
+                                                                                                sentimentr_neg = sum(sentimentr_neg),
+                                                                                                sentimentr_zero = sum(sentimentr_zero))
+
+
+tweets_sample_organic_language_month_sentimentr$year_month <- as.yearmon(paste(tweets_sample_organic_language_month_sentimentr$'year(date)', tweets_sample_organic_language_month_sentimentr$'month(date)'), "%Y %m")
+
+ggplot(tweets_sample_organic_language_month_sentimentr, aes(x=year_month, y=sentiment_sentimentr_avg)) +  geom_line(color="steelblue",size=0.8) + xlab("") + 
+      scale_x_yearmon(labels=date_format("%b %y"), 
+                         breaks = seq(from = min(tweets_sample_organic_language_month_sentimentr$year_month), 
+                                      to = max(tweets_sample_organic_language_month_sentimentr$year_month), 
+                                      by = 1/12),
+                                  expand = expansion(mult = c(0.015, 0.015))) +
+      theme(axis.text.x = element_text(angle = 90)) +
+      ggtitle("SentimentR Positivity Index per Month\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +  labs(x="", y= "Positivity Index")
+
+
+# create graph per month but with bars with sentiments
+# first turn dataframe to long format
+
+tweets_sample_organic_language_month_sentimentr_long <- pivot_longer(tweets_sample_organic_language_month_sentimentr, cols = c("sentimentr_pos", "sentimentr_neg", "sentimentr_zero"), names_to = "Sentiment", values_to = "Number of Tweets")
+
+tweets_sample_organic_language_month_sentimentr_long <- tweets_sample_organic_language_month_sentimentr_long %>%
+  mutate(Sentiment = recode(Sentiment,
+                            "sentimentr_pos" = "Positive",
+                            "sentimentr_neg" = "Negative",
+                            "sentimentr_zero" = "Neutral"))
+
+# Order the levels of the Sentiment variable
+tweets_sample_organic_language_month_sentimentr_long$Sentiment <- 
+  factor(tweets_sample_organic_language_month_sentimentr_long$Sentiment, 
+         levels = c("Negative", "Neutral", "Positive"))
+
+ggplot(tweets_sample_organic_language_month_sentimentr_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col() +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Number of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_sentimentr_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_sentimentr_long$year_month), 
+                               by = 1/12),
+                  expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0.015, 0.04))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("SentimentR Tweets by Sentiment per Month\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL))
+
+
+# Create stacked bar chart
+ggplot(tweets_sample_organic_language_month_sentimentr_long, aes(x=year_month, y=`Number of Tweets`, fill=Sentiment)) + 
+  geom_col(position = position_fill(reverse = FALSE)) +
+  scale_fill_manual(values=c("Positive"="forestgreen", "Negative"="indianred", "Neutral"="darkgrey")) +
+  xlab("") +
+  ylab("Percentage of Tweets") +
+  scale_x_yearmon(labels=date_format("%b %y"), 
+                  breaks = seq(from = min(tweets_sample_organic_language_month_sentimentr_long$year_month), 
+                               to = max(tweets_sample_organic_language_month_sentimentr_long$year_month), 
+                               by = 1/12),
+                  expand = expansion(mult = c(0.015, 0.015))) +
+  scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.y = element_text(size = 12)) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  ggtitle("SentimentR Tweets by Sentiment per Month (%)\n2020-2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(fill="Sentiment") +
+  guides(fill=guide_legend(title=NULL))
+
+
+
+```
+
+
+
+
+https://ladal.edu.au/sentiment.html
+
+
+Schweinberger, Martin. (2022)` Sentiment Analysis in R. Brisbane: The University of Queensland. url: https://ladal.edu.au/sentiment.html (Version 2022.10.30).
+
+References
+Mohammad, Saif M, and Peter D Turney. 2013. “Crowdsourcing a Word-Emotion Association Lexicon.” Computational Intelligence 29 (3): 436–65.
+Silge, Julia, and David Robinson. 2017. Text Mining with r: A Tidy Approach. " O’Reilly Media, Inc.".
+
+
+Warning: Each time `sentiment` is run it has to do sentence boundary disambiguation when a
+raw `character` vector is passed to `text.var`. This may be costly of time and
+memory.  It is highly recommended that the user first runs the raw `character`
+vector through the `get_sentences` function.
+
+
+
+
+```{r sentiment analysis comparison of four}
+
+positivity_index_combined <- left_join(tweets_organic_en_2, tweets_organic_en_3)
+positivity_index_combined <- left_join(positivity_index_combined, tweets_organic_en_4)
+positivity_index_combined <- left_join(positivity_index_combined, tweets_organic_en_5)
+
+positivity_index_combined_month <- left_join(tweets_sample_organic_language_month, tweets_sample_organic_language_month_AFINN)
+positivity_index_combined_month <- left_join(positivity_index_combined_month, tweets_sample_organic_language_month_nrc)
+positivity_index_combined_month <- left_join(positivity_index_combined_month, tweets_sample_organic_language_month_sentimentr)
+positivity_index_combined_month <- positivity_index_combined_month[c(3,7,8,12,16)]
+
+
+
+
+
+positivity_index_combined_month_melt <- melt(positivity_index_combined_month, id = "year_month")
+positivity_index_combined_month_melt$variable <- ifelse(positivity_index_combined_month_melt$variable == "positivity_index_avg" , "Bing",
+                                                        ifelse(positivity_index_combined_month_melt$variable == "tweets_sentiment_nrc_avg", "NRC",
+                                                        ifelse(positivity_index_combined_month_melt$variable == "sentiment_afinn_avg", "AFINN", 
+                                                               "SentimentR")))
+colnames(positivity_index_combined_month_melt)[2] <- "Index"
+
+ggplot(positivity_index_combined_month_melt, aes(x=year_month, y=value, color = Index)) + 
+      geom_line(size=0.75) +
+      scale_x_yearmon(labels=date_format("%b %y"), 
+                         breaks = seq(from = min(positivity_index_combined_month_melt$year_month), 
+                                      to = max(positivity_index_combined_month_melt$year_month), 
+                                      by = 1/12),
+                      expand = expansion(mult = c(0.015, 0.015))) +
+      theme(axis.text.x = element_text(angle = 90)) +
+      ggtitle("Positivity Index per Month AFINN, Bing, NRC & SentimentR\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +  labs(x="", y= "Positivity Index")
+
+
+
+ 
+ positivity_index_combined_melt <- melt(positivity_index_combined, id = "date")
+ positivity_index_combined_melt$variable <- ifelse(positivity_index_combined_melt$variable == "positivity_index_avg" , "Bing",
+                                                        ifelse(positivity_index_combined_melt$variable == "tweets_sentiment_nrc_avg", "NRC",
+                                                        ifelse(positivity_index_combined_melt$variable == "sentiment_afinn_avg", "AFINN", 
+                                                        ifelse(positivity_index_combined_melt$variable == "sentiment_sentimentr_avg", "SentimentR",
+                                                               positivity_index_combined_melt))))
+ positivity_index_combined_melt <- filter(positivity_index_combined_melt, positivity_index_combined_melt$variable %in% c("Bing","NRC","AFINN","SentimentR"))
+ colnames(positivity_index_combined_melt)[2] <- "Index"
+ positivity_index_combined_melt$Index <- as.character(positivity_index_combined_melt$Index)
+ 
+# si importé
+# positivity_index_combined_melt$date <- as.Date(positivity_index_combined_melt$date)
+ 
+ 
+ ggplot(positivity_index_combined_melt, aes(x=date, y=value, color = Index)) +  geom_line() + xlab("") + 
+   ggtitle("Positivity Index per Day AFINN, Bing, NRC & SentimentR\n2020-2022") + theme(plot.title = element_text(hjust = 0.5)) +
+    scale_x_date(labels=date_format("%b %y"), 
+                         breaks = seq(from = as.Date('2020-01-02'), 
+                                      to = as.Date('2022-12-31'), 
+                                      by = '1 month'),
+                      expand = expansion(mult = c(0.015, 0.015))) +
+     theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+   labs(x="", y= "Positivity Index")
+
+
+
+# adjust column names
+colnames(positivity_index_combined)[4] <- "Bing"
+colnames(positivity_index_combined)[6] <- "AFINN"
+colnames(positivity_index_combined)[8] <- "NRC"
+colnames(positivity_index_combined)[10] <- "SentimentR"
+
+# testeo correlación
+
+# ggscatter(positivity_index_combined, x = "Bing", y = "NRC", 
+#           add = "reg.line", conf.int = TRUE, 
+#           cor.coef = TRUE, cor.method = "pearson",
+#           xlab = "Positivity Index Bing", ylab = "Positivity Index NRC")
+# 
+# 
+# cor1 <- cor.test(positivity_index_combined$positivity_index_avg, positivity_index_combined$tweets_sentiment_nrc_avg, method=c("pearson", "kendall", "spearman"))
+# 
+# # Extract the p.value
+# cor1$p.value
+# 
+# # Extract the correlation coefficient
+# cor1$estimate
+
+
+# correlation between the 4 indexes pearson
+
+cor(positivity_index_combined[, c('Bing', 'AFINN', 'NRC', 'SentimentR')], use = "pairwise.complete.obs")
+pairs.panels(positivity_index_combined[, c('Bing', 'AFINN', 'NRC', 'SentimentR')], digits = 3, hist.col = 'lightblue') 
+
+
+# write.csv(positivity_index_combined, file='positivity_index_combined.csv' , row.names = F)
+# write.csv(positivity_index_combined_month, file='positivity_index_combined_month.csv' , row.names = F)
+#  positivity_index_combined <- read.csv('positivity_index_combined.csv')
+#  positivity_index_combined_month <- read.csv('positivity_index_combined_month.csv')
+# si importo, correr también la siguiente linea
+# positivity_index_combined_month$year_month <- as.yearmon(positivity_index_combined_month$'year_month')
+
+
+# correlation between the 4 indexes spearman
+
+cor(positivity_index_combined[, c('Bing', 'AFINN', 'NRC', 'SentimentR')], method = "spearman")
+
+pairs.panels(positivity_index_combined[, c('Bing', 'AFINN', 'NRC', 'SentimentR')], digits = 3, hist.col = 'lightblue', method="spearman")
+
+
+```
+
+
+
+
+```{r download info pfizer stocks}
+
+# https://www.codingfinance.com/post/2018-03-27-download-price/
+
+options("getSymbols.warning4.0"=FALSE)
+options("getSymbols.yahoo.warning"=FALSE)
+
+# Downloading Pfizer price using quantmod
+
+getSymbols("PFE", from = '2020-01-01',
+           to = "2022-12-31",warnings = FALSE,
+           auto.assign = TRUE)
+
+tail(PFE)
+
+chart_Series(PFE)
+chart_Series(PFE['2022-01/2022-06'])
+
+ggplot(PFE, aes(x = index(PFE), y = PFE[, 4])) + 
+  geom_line(color = "steelblue", size=0.7) + 
+  ggtitle("PFE Price Series") + 
+  xlab("Date") + 
+  ylab("Price") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_x_date(breaks = seq(as.Date("2020-01-01"), as.Date("2022-12-31"), by = "1 month"), date_labels = "%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_y_continuous(limits = c(0, NA)) 
+
+
+PFE_df <- as.data.frame(PFE)
+PFE_df <- tibble::rownames_to_column(PFE_df, "date")
+
+PFE_df$week_day <- wday(PFE_df$date) # Sunday is day 1
+
+summary(PFE_df[2:7])
+
+
+# Moving averages
+
+pfe_mm <- PFE
+
+pfe_mm10 <- rollmean(pfe_mm[,6], 10, fill = list(NA, NULL, NA), align = "right")
+pfe_mm30 <- rollmean(pfe_mm[,6], 30, fill = list(NA, NULL, NA), align = "right")
+pfe_mm60 <- rollmean(pfe_mm[,6], 60, fill = list(NA, NULL, NA), align = "right")
+pfe_mm90 <- rollmean(pfe_mm[,6], 90, fill = list(NA, NULL, NA), align = "right")
+
+pfe_mm$mm10 <- coredata(pfe_mm10)
+pfe_mm$mm30 <- coredata(pfe_mm30)
+pfe_mm$mm60 <- coredata(pfe_mm60)
+pfe_mm$mm90 <- coredata(pfe_mm90)
+
+
+ggplot(pfe_mm, aes(x = index(pfe_mm))) +
+  geom_line(aes(y = pfe_mm[,6], color = "PFE")) + ggtitle("PFE Price Series") +
+  geom_line(aes(y = pfe_mm$mm30, color = "30 days MA")) +
+  geom_line(aes(y = pfe_mm$mm90, color = "90 days MA")) + 
+  xlab("Date") + ylab("Price") +
+  theme(plot.title = element_text(hjust = 0.5), panel.border = element_blank()) +
+  scale_colour_manual("Series", values=c("PFE"="gray40", "30 days MA"="firebrick4", "90 days MA"="darkcyan")) +
+          scale_x_date(breaks=seq(as.Date("2020-01-01"),as.Date("2023-01-01"), by = "1 month"), date_labels="%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_y_continuous(limits = c(0, NA)) 
+
+
+
+
+# a esta gráfica tengo que lograr hacerla empezar en 0 el y axis
+
+chartSeries(PFE, theme = 'white')
+
+
+PFE_df$date <- as.Date(PFE_df$date)
+
+pfe_daily_returns <- PFE_df %>%
+                  tq_transmute(select = PFE.Adjusted,           # this specifies which column to select   
+                               mutate_fun = periodReturn,   # This specifies what to do with that column
+                               period = "daily",      # This argument calculates Daily returns
+                               col_rename = "pfe_returns") # renames the column
+
+
+# We will use a line chart for daily returns
+
+pfe_daily_returns %>%
+  ggplot(aes(x = date, y = pfe_returns)) +
+  geom_line(color="steelblue") +
+  theme_classic() +
+  labs(x = "Date", y = "Daily returns") +
+  ggtitle("PFE Daily Returns") +
+  scale_x_date(date_breaks = "years", date_labels = "%Y") +
+  scale_y_continuous(breaks = seq(-0.5,0.6,0.05),
+                     labels = scales::percent) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size=0.5) + # Adding a dotted horizontal line at y = 0
+  geom_hline(aes(yintercept=mean(pfe_returns)), color="black", linetype="dotted", size=0.5)
+
+
+
+# histogram
+
+pfe_daily_returns %>%
+  ggplot(aes(x = pfe_returns)) +
+  geom_histogram(binwidth = 0.005, color="steelblue",fill="lightblue") +
+  theme_classic() +
+  labs(x = "Daily returns", y = "Frequency") + 
+  ggtitle("PFE Daily Returns Histogram") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(n.breaks=10, labels = scales::percent) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size=0.5) + # Adding a dotted vertical line at y = 0
+  geom_vline(aes(xintercept=mean(pfe_returns)), color="black", linetype="dotted", size=0.5)
+
+
+
+#Calculate monthly returns just change the argument "period"
+
+pfe_monthly_returns <- PFE_df %>%
+  tq_transmute(select = PFE.Adjusted,
+               mutate_fun = periodReturn,
+               period = "monthly",      # This argument calculates Monthly returns
+               col_rename = "pfe_returns")
+
+
+# Charting the monthly returns for PFE Using bar charts
+
+pfe_monthly_returns %>%
+  ggplot(aes(x = date, y = pfe_returns)) +
+  geom_bar(stat = "identity", color="steelblue",fill="lightblue") +
+  theme_classic() +
+  labs(x = "Date", y = "Monthly returns") +
+  ggtitle("PFE Monthly Returns") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0) +
+  scale_y_continuous(breaks = seq(-0.6,0.8,0.1),
+                     labels = scales::percent) +
+  scale_x_date(breaks = seq(as.Date("2019-12-31"), as.Date("2022-12-31"), by = "1 month"), date_labels = "%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+
+
+# Calculating the cumulative returns for the Pfizer stock
+
+# Plotting the daily and monthly returns are useful for understanding the daily and monthly volatility of the investment. To calculate the growth of our investment or in other word, calculating the total returns from our investment, we need to calculate the cumulative returns from that investment. To calculate the cumulative returns we will use the cumprod() function.
+
+pfe_cum_returns <- pfe_daily_returns %>%
+  mutate(cr = cumprod(1 + pfe_returns)) %>%      # using the cumprod function
+  mutate(cumulative_returns = cr - 1)
+
+pfe_cum_returns %>%
+  ggplot(aes(x = date, y = cumulative_returns)) +
+  geom_line(color="steelblue", size=0.7) +
+  theme_classic() +
+  labs(x = "Date", y = "Cumulative Returns") +
+  ggtitle("PFE Cumulative Returns\n2020-2022", subtitle = "$1 investment in 2020 grew to $1.54 by the end of 2022") +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5)) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_date(breaks = seq(as.Date("2020-01-01"), as.Date("2023-01-01"), by = "1 month"), date_labels = "%b %y", expand = expansion(mult = c(0.015, 0.015))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+pfe_monthly_returns %>%
+  mutate(cr = cumprod(1 + pfe_returns)) %>%
+  mutate(cumulative_returns = cr - 1) %>%
+  ggplot(aes(x = date, y = cumulative_returns)) +
+  geom_line() +
+  theme_classic() +
+  labs(x = "Date", y = "Cumulative Returns") +
+  ggtitle("Cumulative returns for Pfizer\n2020-2022", subtitle = "$1 investment in 2020 grew to $1.54 by the end of 2022") +
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5)) +
+  scale_y_continuous(labels = scales::percent)
+
+
+
+# Calculating the mean
+pfe_daily_returns %>%   select(pfe_returns) %>% .[[1]] %>% mean(na.rm = TRUE)
+
+```
+
+
+
+```{r cor volume tweets}
+
+# Tema a tener en cuenta: no hay datos los días no hábiles (fines de semana por ejemplo). ¿Cómo trato eso?
+# hacer introducción conceptual de qué es el volumen. explicar cómo se relacionan. conclusiones.
+
+tweets_date$date <- as.Date(tweets_date$date2)
+PFE_df$date <- as.Date(PFE_df$date)
+
+lm_1_df <- left_join(tweets_date, PFE_df)
+lm_1_df$week_day <- weekdays(lm_1_df$date) # Sunday is day 1
+lm_1_df["PFE.Volume"][is.na(lm_1_df["PFE.Volume"])] <- 0  # replace NA in volumne column with 0
+
+# correlation between the 4 indexes and the volume
+
+# pearson
+cor(lm_1_df[,c('Bing', 'AFINN', 'nrc' , 'sentimentr','PFE.Volume')])
+# pairs.panels(lm_1_df[,c('Bing', 'AFINN', 'nrc', 'sentimentr', 'PFE.Volume' )], digits = 3, hist.col = 'lightblue')
+
+# spearman
+cor(lm_1_df[,c('Bing', 'AFINN', 'nrc' , 'sentimentr','PFE.Volume')], method = "spearman")
+
+
+
+
+# correlation between the 4 absolute indexes and the volume
+
+# pearson
+
+cor(lm_1_df[,c('Bing_abs', 'AFINN_abs', 'nrc_abs' , 'sentimentr_abs','PFE.Volume')])
+# pairs.panels(lm_1_df[,c('Bing', 'AFINN', 'nrc', 'sentimentr', 'PFE.Volume' )], digits = 3, hist.col = 'lightblue')
+
+# spearman 
+
+cor(lm_1_df[,c('Bing_abs', 'AFINN_abs', 'nrc_abs' , 'sentimentr_abs','PFE.Volume')], method = "spearman")
+# pairs.panels(lm_1_df[,c('Bing', 'AFINN', 'nrc', 'sentimentr', 'PFE.Volume' )], digits = 3, hist.col = 'lightblue', method = "spearman")
+
+
+# Remove weekends and banking holidays (all days with 0 traded volume)
+
+lm_1_df_only_weekdays <- subset(lm_1_df, !is.na(lm_1_df[,'PFE.Open']))
+
+
+# correlation between the 4 indexes and the volume
+
+# pearson
+
+cor(lm_1_df_only_weekdays[,c('Bing', 'AFINN', 'nrc' , 'sentimentr','PFE.Volume')])
+# pairs.panels(lm_1_df_only_weekdays[,c('Bing', 'AFINN', 'nrc', 'sentimentr', 'PFE.Volume' )], digits = 3, hist.col = 'lightblue')
+
+# spearman
+
+cor(lm_1_df_only_weekdays[,c('Bing', 'AFINN', 'nrc' , 'sentimentr','PFE.Volume')], method = "spearman")
+
+
+# correlation between number of tweets and volume
+
+# pearson
+
+cor(lm_1_df_only_weekdays[,c('tweets_count', 'PFE.Volume')])
+cor(lm_1_df[,c('tweets_count', 'PFE.Volume')])
+
+# spearman
+
+cor(lm_1_df_only_weekdays[,c('tweets_count', 'PFE.Volume')], method = "spearman")
+cor(lm_1_df[,c('tweets_count', 'PFE.Volume')], method = "spearman")
+
+
+
+
+```
+
+```{r cor daily returns}
+
+# puedo hacer diferencia entre apertura y cierre. pero también hay que tener en cuenta que hay una diferencia entre cierre de ayer y apertura de hoy.
+# otro tema es qué pasa con los días no hábiles.
+# usar variable día de la semana. dummies?
+
+
+# Calculate daily price variation
+daily_returns <- dailyReturn(PFE)
+daily_returns <- data.frame(date2 = index(daily_returns), daily_return = coredata(daily_returns))
+
+lm_1_df_only_weekdays$date2 <- as.Date(lm_1_df_only_weekdays$date2)
+
+lm_1_df_only_weekdays <- left_join(lm_1_df_only_weekdays, daily_returns)
+
+
+
+# empiezo con las correlaciones
+
+# correlation between the 4 indexes and the daily returns
+
+# pearson
+
+cor(lm_1_df_only_weekdays[,c('Bing', 'AFINN', 'nrc' , 'sentimentr','daily.returns')])
+# pairs.panels(lm_1_df_only_weekdays[,c('Bing', 'AFINN', 'nrc', 'sentimentr', 'daily.returns' )], digits = 3, hist.col = 'lightblue')
+
+# spearman
+
+cor(lm_1_df_only_weekdays[,c('Bing', 'AFINN', 'nrc' , 'sentimentr','daily.returns')], method = "spearman")
+
+# correlation between the 4 absolute indexes and the daily returns
+#pearson
+cor(lm_1_df_only_weekdays[,c('Bing_abs', 'AFINN_abs', 'nrc_abs' , 'sentimentr_abs','daily.returns')])
+# pairs.panels(lm_1_df_only_weekdays[,c('Bing', 'AFINN', 'nrc', 'sentimentr', 'daily.returns' )], digits = 3, hist.col = 'lightblue')
+
+#spearman
+cor(lm_1_df_only_weekdays[,c('Bing_abs', 'AFINN_abs', 'nrc_abs' , 'sentimentr_abs','daily.returns')], method="spearman")
+
+# correlation between number of tweets and daily returns
+
+# pearson
+
+cor(lm_1_df_only_weekdays[,c('tweets_count', 'daily.returns')])
+
+# spearman
+
+cor(lm_1_df_only_weekdays[,c('tweets_count', 'daily.returns')], method = "spearman")
+
+# correlation between number of tweets and absolute value of daily returns
+
+lm_1_df_only_weekdays <- lm_1_df_only_weekdays %>% mutate(daily.returns_abs = abs(daily.returns) )
+cor(lm_1_df_only_weekdays[,c('tweets_count', 'daily.returns_abs')])
+
+
+```
+
